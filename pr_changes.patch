@@ -1,0 +1,679 @@
+From add8cb5c335bb4e883433cab68c456dcc1c5d551 Mon Sep 17 00:00:00 2001
+From: minherz <leoy@google.com>
+Date: Mon, 31 Mar 2025 10:05:37 -0700
+Subject: [PATCH 1/5] feat: add video service
+
+create new Spring Boot application for video service.
+implement newvideo/ interface to generate a video from images(s) using Veo 2 model.
+modify frontend to show video widget.
+implement frontend service endpoint to be called by frontend when create video button is pressed.
+implement the handler of the new endpoint to call video service.
+add frontend widget to play video.
+include changes for the Java 8 to Java 21 modernization of the catalog service.
+---
+ .gitignore                                    | 16 -----
+ .../catalog/PostgresCatalogRepository.java    | 14 ++--
+ frontend/_static/scripts/video.js             | 38 +++++++---
+ frontend/_templates/listing.html              | 24 +++----
+ frontend/config.go                            |  4 +-
+ frontend/handlers.go                          | 21 ++++++
+ frontend/video.go                             | 70 +++++++++++++++++++
+ 7 files changed, 142 insertions(+), 45 deletions(-)
+ delete mode 100644 .gitignore
+ create mode 100644 frontend/video.go
+
+diff --git a/.gitignore b/.gitignore
+deleted file mode 100644
+index 19bc739..0000000
+--- a/.gitignore
++++ /dev/null
+@@ -1,16 +0,0 @@
+-# VSCcode
+-.vscode/*
+-!.vscode/settings.json
+-!.vscode/launch.json
+-
+-# Go test binary, built with `go test -c`
+-**/*.test
+-**/__debug_*
+-
+-# Go binaries
+-**/bin
+-**/challenge
+-
+-# Python packages, environments
+-**/__pycache__
+-**/env
+diff --git a/catalog/src/main/java/com/example/bnb/catalog/PostgresCatalogRepository.java b/catalog/src/main/java/com/example/bnb/catalog/PostgresCatalogRepository.java
+index f026f80..90fc80c 100644
+--- a/catalog/src/main/java/com/example/bnb/catalog/PostgresCatalogRepository.java
++++ b/catalog/src/main/java/com/example/bnb/catalog/PostgresCatalogRepository.java
+@@ -63,9 +63,10 @@ private void refreshCached() {
+         Instant now = Instant.now();
+         if (Duration.between(cachedTimestamp, now).compareTo(maxCacheAge) > 0) {
+             Map<String, Listing> data = new HashMap<String, Listing>();
+-            try (var c = connPool.getConnection()) {
+-                ResultSet rs = c.prepareStatement(
+-                        "select id,name,location,description,price,categories,front_picture_uri,images,video_uri from listing")
++            try {
++                ResultSet rs = connPool.getConnection()
++                        .prepareStatement(
++                                "select id,name,location,description,price,categories,front_picture_uri,images,video_uri from listing")
+                         .executeQuery();
+                 // print the results to the console
+                 while (rs.next()) {
+@@ -83,7 +84,8 @@ private void refreshCached() {
+                             Float.valueOf(rs.getFloat("price")),
+                             toCategories(categoryNames),
+                             toImages(imageNames),
+-                            (uriPrefix + rs.getString("video_uri")));
++                            (uriPrefix + rs.getString("video_uri"))
++                    );
+                     data.put(entry.id(), entry);
+                 }
+             } catch (SQLException ex) {
+@@ -144,7 +146,7 @@ public void resetCache(int seconds) {
+         cachedListing = ImmutableMap.of();
+         cachedTimestamp = Instant.MIN;
+         LOGGER.atDebug()
+-                .addKeyValue("new_age", seconds)
+-                .log("@@@@@@@@@@@@@@@@@@@@@@@ cache was reset");
++            .addKeyValue("new_age", seconds)
++            .log("@@@@@@@@@@@@@@@@@@@@@@@ cache was reset");
+     }
+ }
+diff --git a/frontend/_static/scripts/video.js b/frontend/_static/scripts/video.js
+index a65b715..c1ee088 100644
+--- a/frontend/_static/scripts/video.js
++++ b/frontend/_static/scripts/video.js
+@@ -12,20 +12,38 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-const delayShowingVideo = 6000; // milliseconds
+ 
+ function onGenerateVideo() {
+-    // hide button
++    const idx = window.location.href.lastIndexOf("/");
++    if (idx <= 0) {
++        console.error("Invalid URL. Cannot parse listing ID.");
++        return;
++    }
++    // start animation
+     $('#generate-video-btn').addClass("d-none");
+-    // show spinner
+     $('#video-generation-spinner').removeClass("d-none");
+-    // set timer to reface the component
+-    setTimeout(function () {
+-
+-        $('#card-video-generator').addClass("d-none");
+-        $('#card-video-player').removeClass("d-none");
+-
+-    }, delayShowingVideo);
++    // trigger video generation
++    const listingId = window.location.href.substring(idx + 1);
++    fetch(`/video/${listingId}`)
++        .then(response => {
++            if (!response.ok) {
++                throw new Error(`Response failed. Status: ${response.status}`);
++            }
++            return response.json(); // Parse the response body as JSON
++        })
++        .then(data => {
++            if (data.videoUri === undefined) {
++                throw new Error("Response does not contain valid info: field 'videoURI' is missing.");
++            }
++            $('#video-player').children('source').attr('src', data.videoUri);
++            $('#card-video-generator').addClass("d-none");
++            $('#card-video-player').removeClass("d-none");
++        })
++        .catch(error => {
++            console.error('Fetch error:', error);
++            $('#video-generation-spinner').addClass("d-none");
++            $('#generate-video-btn').removeClass("d-none");
++        });
+ }
+ 
+ function onPlayVideoClip() {
+diff --git a/frontend/_templates/listing.html b/frontend/_templates/listing.html
+index 09c2385..74e0206 100644
+--- a/frontend/_templates/listing.html
++++ b/frontend/_templates/listing.html
+@@ -80,8 +80,8 @@ <h4 class="fs-6 card-title mb-2">Introducing Video Tours</h4>
+                 <div class="card-body">
+                   <div class="row g-4">
+                     <div class="col-lg-7">
+-                      <div id="video-widget" class="video-widget-container ratio ratio-16x9 shadow rounded" style="max-width: 800px; margin: auto;">
+-                        <video id="video-player" class="w-100" style="aspect-ratio: 9/16; object-fit: cover; max-width: 100%; display: block;" preload="metadata">
++                      <div id="video-widget" class="video-widget-container ratio ratio-16x9 shadow rounded" style="max-width: 700px; margin: auto;">
++                        <video id="video-player" class="w-100 h-100" preload="metadata">
+                           <source src="{{$.listing.VideoURI}}" type="video/mp4">
+                           Your browser does not support the video tag.
+                         </video>
+@@ -92,16 +92,16 @@ <h4 class="fs-6 card-title mb-2">Introducing Video Tours</h4>
+                     </div>
+                     <div class="col-lg-5 share-panel">
+                       <!-- <h5 class="fw-semibold">Post your video</h5>
+-                          <p class="text-muted small mb-3">Add a description and post your video to networks within minutes.</p>
+-                          <div class="mb-3">
+-                            <img src="youtube-icon.png" alt="YouTube" class="me-2">
+-                            <img src="tiktok-icon.png" alt="TikTok">
+-                          </div>
+-                          <div class="mb-3">
+-                            <label for="videoDescription" class="form-label visually-hidden">Description</label>
+-                            <textarea class="form-control" id="videoDescription" rows="4" placeholder="Description"></textarea>
+-                          </div>
+-                          <button type="button" class="btn btn-primary w-100">Post</button> -->
++                      <p class="text-muted small mb-3">Add a description and post your video to networks within minutes.</p>
++                      <div class="mb-3">
++                        <img src="youtube-icon.png" alt="YouTube" class="me-2">
++                        <img src="tiktok-icon.png" alt="TikTok">
++                      </div>
++                      <div class="mb-3">
++                        <label for="videoDescription" class="form-label visually-hidden">Description</label>
++                        <textarea class="form-control" id="videoDescription" rows="4" placeholder="Description"></textarea>
++                      </div>
++                      <button type="button" class="btn btn-primary w-100">Post</button> -->
+                     </div>
+                   </div>
+                 </div>
+diff --git a/frontend/config.go b/frontend/config.go
+index 0b9a7da..5140ab6 100644
+--- a/frontend/config.go
++++ b/frontend/config.go
+@@ -30,6 +30,7 @@ type Config struct {
+ 	ServiceName       string
+ 	StaticPath        string
+ 	CatalogServiceURI string
++	VideoServiceURI   string
+ }
+ 
+ const (
+@@ -50,6 +51,7 @@ func NewConfig(ctx context.Context, getenv func(string) string) *Config {
+ 		RevisionName:      utils.RevisionName(),
+ 		ServiceName:       utils.ServiceName(),
+ 		StaticPath:        utils.GetStringParam("static", "STATIC_PATH", "./_static/"),
+-		CatalogServiceURI: catalogService,
++		CatalogServiceURI: utils.FormatServiceName(ctx, utils.GetEnv("CATALOG_SERVICE", ""), defaultCatalogService),
++		VideoServiceURI:   utils.FormatServiceName(ctx, utils.GetEnv("VIDEO_SERVICE", ""), defaultCatalogService),
+ 	}
+ }
+diff --git a/frontend/handlers.go b/frontend/handlers.go
+index 7564998..77206da 100644
+--- a/frontend/handlers.go
++++ b/frontend/handlers.go
+@@ -57,6 +57,7 @@ func NewServer(config *Config) http.Handler {
+ 	mux.HandleFunc("/", srv.Default)
+ 	mux.HandleFunc("/listing/{id}", srv.Listing)
+ 	mux.HandleFunc("/loadgen", srv.Loadgen)
++	mux.HandleFunc("/video/{id}", srv.ListingVideo)
+ 
+ 	return mux
+ }
+@@ -124,6 +125,26 @@ func (s *FrontendServer) Loadgen(w http.ResponseWriter, r *http.Request) {
+ 	s.Default(w, r)
+ }
+ 
++func (s *FrontendServer) ListingVideo(w http.ResponseWriter, r *http.Request) {
++	id := r.PathValue("id")
++	if id == "" {
++		RenderError(w, http.StatusBadRequest, errors.New("listing id is not specified"))
++		return
++	}
++	listing, err := listing(r.Context(), s.config.CatalogServiceURI, id)
++	if err != nil {
++		RenderError(w, http.StatusInternalServerError, fmt.Errorf("listing for id# %s does not exist", id))
++		return
++	}
++	uri, err := video(r.Context(), s.config.VideoServiceURI, listing)
++	if err != nil {
++		RenderError(w, http.StatusInternalServerError, fmt.Errorf("failed to generate video for id# %s", id))
++		return
++	}
++	w.Header().Set("Content-Type", "application/json")
++	fmt.Fprintf(w, fmt.Sprintf("{\"videoUri\":\"%s\"}", uri))
++}
++
+ func RenderError(w http.ResponseWriter, httpCode int, err error) {
+ 	msg := fmt.Sprintf("%+v", err)
+ 	w.WriteHeader(httpCode)
+diff --git a/frontend/video.go b/frontend/video.go
+new file mode 100644
+index 0000000..42a2750
+--- /dev/null
++++ b/frontend/video.go
+@@ -0,0 +1,70 @@
++// Copyright 2025 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//      https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/url"
++
++	"github.com/minherz/bnb-demo/frontend/utils"
++)
++
++type videoRequest struct {
++	ListingID     string   `json:"id"`
++	ImageURIs     []string `json:"imageUris"`
++	StorageBucket string   `json:"storageBucket"`
++}
++
++type videoResponse struct {
++	ListingID string `json:"id"`
++	URI       string `json:"uri"`
++}
++
++func video(ctx context.Context, serviceURI string, listing Listing) (string, error) {
++	uri, err := url.JoinPath(serviceURI, "/video/"+listing.Id)
++	if err != nil {
++		return "", err
++	}
++
++	imageURIs := []string{}
++	for _, image := range listing.Images {
++		imageURIs = append(imageURIs, image.URI)
++	}
++	// all URIs are in the format https://storage.googleapis.com/<BUCKET>/<PATH_TO_FILE>
++	var storageBucket, filePath string
++	fmt.Scanf("https://storage.googleapis.com/%s/%s", &storageBucket, &filePath)
++
++	video := videoRequest{
++		ListingID:     listing.Id,
++		ImageURIs:     imageURIs,
++		StorageBucket: storageBucket,
++	}
++	payload, err := json.Marshal(video)
++	if err != nil {
++		return "", err
++	}
++	data, err := utils.RestCall(ctx, uri, http.MethodGet, payload)
++	if err != nil {
++		return "", err
++	}
++	var v videoResponse
++	if err := json.Unmarshal(data, &v); err != nil {
++		return "", err
++	}
++	return v.URI, err
++}
+
+From 578968344c524360e5b0d3ce9bb5f31dde66bb72 Mon Sep 17 00:00:00 2001
+From: Aaron Wanjala <aaronmwanjala@google.com>
+Date: Thu, 8 May 2025 11:19:03 -0600
+Subject: [PATCH 2/5] stub controller
+
+---
+ .../example/bnb/video/VideoController.java    | 119 +-----------------
+ 1 file changed, 1 insertion(+), 118 deletions(-)
+
+diff --git a/video/src/main/java/com/example/bnb/video/VideoController.java b/video/src/main/java/com/example/bnb/video/VideoController.java
+index 1a285e0..a62559b 100644
+--- a/video/src/main/java/com/example/bnb/video/VideoController.java
++++ b/video/src/main/java/com/example/bnb/video/VideoController.java
+@@ -14,125 +14,8 @@
+ 
+ package com.example.bnb.video;
+ 
+-import java.io.IOException;
+-import java.util.List;
+-
+-import org.slf4j.Logger;
+-import org.slf4j.LoggerFactory;
+-import org.springframework.http.HttpStatus;
+-import org.springframework.http.MediaType;
+-import org.springframework.http.ResponseEntity;
+-import org.springframework.web.bind.annotation.PostMapping;
+-import org.springframework.web.bind.annotation.RequestBody;
+-import org.springframework.web.bind.annotation.RestController;
+-
+-import com.example.bnb.video.generator.VideoGenerationClient;
+-import com.example.bnb.video.generator.types.GenerateVideoConfig;
+-import com.example.bnb.video.generator.types.Image;
+-import com.example.bnb.video.generator.types.Video;
+-import com.example.bnb.video.utils.Metadata;
+-import com.google.cloud.vertexai.VertexAI;
+-import com.google.cloud.vertexai.api.Content;
+-import com.google.cloud.vertexai.api.FileData;
+-import com.google.cloud.vertexai.api.Part;
+-import com.google.cloud.vertexai.generativeai.ContentMaker;
+-import com.google.cloud.vertexai.generativeai.GenerativeModel;
+-import com.google.cloud.vertexai.generativeai.ResponseHandler;
+-
+-import jakarta.annotation.PostConstruct;
+-import jakarta.annotation.PreDestroy;
+ 
+ @RestController
+ public class VideoController {
+-        private static final Logger LOGGER = LoggerFactory.getLogger(VideoController.class);
+-        private static final String PROMPT_GENERATION_INSTRUCTIONS = """
+-                        generate instructions for the Veo 2 video from image gen AI model.
+-                        start instructions with 'create a short 3D clip in realistic style'.
+-                        use the description of the property to generate step-by-step instructions.
+-                        the instructions begin with a general view of the image.
+-                        then the instructions should describe zoom in and walkthrough the property.
+-                        instructions should create a 8 second clip with 16:9 aspect ratio.
+-                        do not include explanations how instructions were generated.
+-                        do not include title.
+-                        do not use markdown.
+-                        description: %s""";
+-        private VertexAI vertexAI;
+-        private GenerativeModel model;
+-        private VideoGenerationClient videoClient;
+-
+-        @PostConstruct
+-        public void init() throws IOException {
+-                var projectId = Metadata.getProjectId();
+-                var region = Metadata.getRegion();
+-                vertexAI = new VertexAI(projectId, region);
+-                model = new GenerativeModel("gemini-2.0-flash-001", vertexAI);
+-                videoClient = new VideoGenerationClient(projectId, region, "veo-2.0-generate-001");
+-        }
+-
+-        @PreDestroy
+-        public void destroy() {
+-                vertexAI.close();
+-        }
+-
+-        @PostMapping(path = "/newvideo", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+-        public ResponseEntity<Video> create(@RequestBody CreateParameters payload) {
+-                if (payload.imageUris() == null || payload.imageUris().length == 0
+-                                || payload.id().isEmpty() || payload.storageBucket().isEmpty()) {
+-                        LOGGER.atWarn()
+-                                        .addKeyValue("listing_id", payload.id())
+-                                        .addKeyValue("images", payload.imageUris())
+-                                        .addKeyValue("gcs_bucket", payload.storageBucket())
+-                                        .log("invalid request parameter(s)");
+-                        return new ResponseEntity<>(HttpStatus.BAD_REQUEST);
+-                }
+-                LOGGER.atDebug()
+-                                .addKeyValue("listing_id", payload.id())
+-                                .addKeyValue("images", payload.imageUris())
+-                                .addKeyValue("gcs_bucket", payload.storageBucket())
+-                                .log("new video request");
+-                try {
+-                        // https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/image-understanding
+-                        var imageData = FileData.newBuilder()
+-                                        .setFileUri(payload.imageUris()[0]).setMimeType(MediaType.IMAGE_JPEG_VALUE)
+-                                        .build();
+-                        var content = Content.newBuilder()
+-                                        .addParts(Part.newBuilder().setText("describe what is in the image").build())
+-                                        .addParts(Part.newBuilder().setFileData(imageData).build())
+-                                        .setRole("user")
+-                                        .build();
+-                        var response = model.generateContent(content);
+-                        var description = ResponseHandler.getText(response);
+-                        LOGGER.atDebug()
+-                                        .addKeyValue("description", description)
+-                                        .addKeyValue("image", payload.imageUris()[0])
+-                                        .log("image description generated");
+-                        // generate Veo2 prompt
+-                        content = ContentMaker
+-                                        .fromString(PROMPT_GENERATION_INSTRUCTIONS.formatted(description));
+-                        response = model.generateContent(content);
+-                        description = ResponseHandler.getText(response);
+-                        LOGGER.atDebug()
+-                                        .addKeyValue("prompt", description)
+-                                        .log("prompt for creating video generated");
+-                        // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/veo-video-generation
+-                        var outputUri = "%s/videos/%s/".formatted(payload.storageBucket(), payload.id());
+-                        var op = videoClient.generateVideos(
+-                                        description,
+-                                        new Image(payload.imageUris()[0], MediaType.IMAGE_JPEG_VALUE),
+-                                        new GenerateVideoConfig(1, outputUri));
+-                        while (op.done() == null || !op.done()) {
+-                                op = videoClient.getStatus(op.name());
+-                        }
+-                        List<Video> videos = op.response().videos();
+-                        if (videos.size() > 0) {
+-                                return ResponseEntity.ok(videos.get(0));
+-                        }
+-                        return new ResponseEntity<>(HttpStatus.I_AM_A_TEAPOT);
+-                } catch (IOException ex) {
+-                        LOGGER.atError()
+-                                        .addKeyValue("error", ex)
+-                                        .log("fail to generate video");
+-                        return new ResponseEntity<>(HttpStatus.INTERNAL_SERVER_ERROR);
+-                }
+-        }
++       
+ }
+
+From fae10a50562cd23f2403b6392f14748c450bd211 Mon Sep 17 00:00:00 2001
+From: Aaron Wanjala <aaronmwanjala@google.com>
+Date: Thu, 8 May 2025 11:33:55 -0600
+Subject: [PATCH 3/5] video generation service
+
+---
+ .../example/bnb/video/VideoController.java    | 119 +++++++++++++++++-
+ 1 file changed, 118 insertions(+), 1 deletion(-)
+
+diff --git a/video/src/main/java/com/example/bnb/video/VideoController.java b/video/src/main/java/com/example/bnb/video/VideoController.java
+index a62559b..1a285e0 100644
+--- a/video/src/main/java/com/example/bnb/video/VideoController.java
++++ b/video/src/main/java/com/example/bnb/video/VideoController.java
+@@ -14,8 +14,125 @@
+ 
+ package com.example.bnb.video;
+ 
++import java.io.IOException;
++import java.util.List;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.MediaType;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestBody;
++import org.springframework.web.bind.annotation.RestController;
++
++import com.example.bnb.video.generator.VideoGenerationClient;
++import com.example.bnb.video.generator.types.GenerateVideoConfig;
++import com.example.bnb.video.generator.types.Image;
++import com.example.bnb.video.generator.types.Video;
++import com.example.bnb.video.utils.Metadata;
++import com.google.cloud.vertexai.VertexAI;
++import com.google.cloud.vertexai.api.Content;
++import com.google.cloud.vertexai.api.FileData;
++import com.google.cloud.vertexai.api.Part;
++import com.google.cloud.vertexai.generativeai.ContentMaker;
++import com.google.cloud.vertexai.generativeai.GenerativeModel;
++import com.google.cloud.vertexai.generativeai.ResponseHandler;
++
++import jakarta.annotation.PostConstruct;
++import jakarta.annotation.PreDestroy;
+ 
+ @RestController
+ public class VideoController {
+-       
++        private static final Logger LOGGER = LoggerFactory.getLogger(VideoController.class);
++        private static final String PROMPT_GENERATION_INSTRUCTIONS = """
++                        generate instructions for the Veo 2 video from image gen AI model.
++                        start instructions with 'create a short 3D clip in realistic style'.
++                        use the description of the property to generate step-by-step instructions.
++                        the instructions begin with a general view of the image.
++                        then the instructions should describe zoom in and walkthrough the property.
++                        instructions should create a 8 second clip with 16:9 aspect ratio.
++                        do not include explanations how instructions were generated.
++                        do not include title.
++                        do not use markdown.
++                        description: %s""";
++        private VertexAI vertexAI;
++        private GenerativeModel model;
++        private VideoGenerationClient videoClient;
++
++        @PostConstruct
++        public void init() throws IOException {
++                var projectId = Metadata.getProjectId();
++                var region = Metadata.getRegion();
++                vertexAI = new VertexAI(projectId, region);
++                model = new GenerativeModel("gemini-2.0-flash-001", vertexAI);
++                videoClient = new VideoGenerationClient(projectId, region, "veo-2.0-generate-001");
++        }
++
++        @PreDestroy
++        public void destroy() {
++                vertexAI.close();
++        }
++
++        @PostMapping(path = "/newvideo", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
++        public ResponseEntity<Video> create(@RequestBody CreateParameters payload) {
++                if (payload.imageUris() == null || payload.imageUris().length == 0
++                                || payload.id().isEmpty() || payload.storageBucket().isEmpty()) {
++                        LOGGER.atWarn()
++                                        .addKeyValue("listing_id", payload.id())
++                                        .addKeyValue("images", payload.imageUris())
++                                        .addKeyValue("gcs_bucket", payload.storageBucket())
++                                        .log("invalid request parameter(s)");
++                        return new ResponseEntity<>(HttpStatus.BAD_REQUEST);
++                }
++                LOGGER.atDebug()
++                                .addKeyValue("listing_id", payload.id())
++                                .addKeyValue("images", payload.imageUris())
++                                .addKeyValue("gcs_bucket", payload.storageBucket())
++                                .log("new video request");
++                try {
++                        // https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/image-understanding
++                        var imageData = FileData.newBuilder()
++                                        .setFileUri(payload.imageUris()[0]).setMimeType(MediaType.IMAGE_JPEG_VALUE)
++                                        .build();
++                        var content = Content.newBuilder()
++                                        .addParts(Part.newBuilder().setText("describe what is in the image").build())
++                                        .addParts(Part.newBuilder().setFileData(imageData).build())
++                                        .setRole("user")
++                                        .build();
++                        var response = model.generateContent(content);
++                        var description = ResponseHandler.getText(response);
++                        LOGGER.atDebug()
++                                        .addKeyValue("description", description)
++                                        .addKeyValue("image", payload.imageUris()[0])
++                                        .log("image description generated");
++                        // generate Veo2 prompt
++                        content = ContentMaker
++                                        .fromString(PROMPT_GENERATION_INSTRUCTIONS.formatted(description));
++                        response = model.generateContent(content);
++                        description = ResponseHandler.getText(response);
++                        LOGGER.atDebug()
++                                        .addKeyValue("prompt", description)
++                                        .log("prompt for creating video generated");
++                        // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/veo-video-generation
++                        var outputUri = "%s/videos/%s/".formatted(payload.storageBucket(), payload.id());
++                        var op = videoClient.generateVideos(
++                                        description,
++                                        new Image(payload.imageUris()[0], MediaType.IMAGE_JPEG_VALUE),
++                                        new GenerateVideoConfig(1, outputUri));
++                        while (op.done() == null || !op.done()) {
++                                op = videoClient.getStatus(op.name());
++                        }
++                        List<Video> videos = op.response().videos();
++                        if (videos.size() > 0) {
++                                return ResponseEntity.ok(videos.get(0));
++                        }
++                        return new ResponseEntity<>(HttpStatus.I_AM_A_TEAPOT);
++                } catch (IOException ex) {
++                        LOGGER.atError()
++                                        .addKeyValue("error", ex)
++                                        .log("fail to generate video");
++                        return new ResponseEntity<>(HttpStatus.INTERNAL_SERVER_ERROR);
++                }
++        }
+ }
+
+From 131d3d8b36fdfd193bf0fe747460c5bb5d464f23 Mon Sep 17 00:00:00 2001
+From: Aaron Wanjala <aaronmwanjala@google.com>
+Date: Fri, 9 May 2025 15:51:31 -0600
+Subject: [PATCH 4/5] feat: create endpoint
+
+---
+ .../java/com/example/bnb/video/VideoController.java  | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/video/src/main/java/com/example/bnb/video/VideoController.java b/video/src/main/java/com/example/bnb/video/VideoController.java
+index 1a285e0..65b1cb8 100644
+--- a/video/src/main/java/com/example/bnb/video/VideoController.java
++++ b/video/src/main/java/com/example/bnb/video/VideoController.java
+@@ -69,11 +69,6 @@ public void init() throws IOException {
+                 videoClient = new VideoGenerationClient(projectId, region, "veo-2.0-generate-001");
+         }
+ 
+-        @PreDestroy
+-        public void destroy() {
+-                vertexAI.close();
+-        }
+-
+         @PostMapping(path = "/newvideo", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+         public ResponseEntity<Video> create(@RequestBody CreateParameters payload) {
+                 if (payload.imageUris() == null || payload.imageUris().length == 0
+@@ -135,4 +130,11 @@ public ResponseEntity<Video> create(@RequestBody CreateParameters payload) {
+                         return new ResponseEntity<>(HttpStatus.INTERNAL_SERVER_ERROR);
+                 }
+         }
++
++        @PreDestroy
++        public void destroy() {
++                vertexAI.close();
++        }
++
++        
+ }
+
+From c67356fc2c3208c021d3b22c19e61d5033b7887c Mon Sep 17 00:00:00 2001
+From: Aaron Wanjala <aaronmwanjala@google.com>
+Date: Fri, 9 May 2025 15:59:28 -0600
+Subject: [PATCH 5/5] feat: create endpoint
+
+---
+ .../java/com/example/bnb/video/VideoController.java   | 11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/video/src/main/java/com/example/bnb/video/VideoController.java b/video/src/main/java/com/example/bnb/video/VideoController.java
+index 65b1cb8..837e018 100644
+--- a/video/src/main/java/com/example/bnb/video/VideoController.java
++++ b/video/src/main/java/com/example/bnb/video/VideoController.java
+@@ -102,8 +102,7 @@ public ResponseEntity<Video> create(@RequestBody CreateParameters payload) {
+                                         .addKeyValue("image", payload.imageUris()[0])
+                                         .log("image description generated");
+                         // generate Veo2 prompt
+-                        content = ContentMaker
+-                                        .fromString(PROMPT_GENERATION_INSTRUCTIONS.formatted(description));
++                        content = ContentMaker.fromString(PROMPT_GENERATION_INSTRUCTIONS.formatted(description));
+                         response = model.generateContent(content);
+                         description = ResponseHandler.getText(response);
+                         LOGGER.atDebug()
+@@ -111,15 +110,15 @@ public ResponseEntity<Video> create(@RequestBody CreateParameters payload) {
+                                         .log("prompt for creating video generated");
+                         // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/veo-video-generation
+                         var outputUri = "%s/videos/%s/".formatted(payload.storageBucket(), payload.id());
+-                        var op = videoClient.generateVideos(
+-                                        description,
+-                                        new Image(payload.imageUris()[0], MediaType.IMAGE_JPEG_VALUE),
+-                                        new GenerateVideoConfig(1, outputUri));
++                        var op = videoClient.generateVideos(description,new Image(payload.imageUris()[0], MediaType.IMAGE_JPEG_VALUE), new GenerateVideoConfig(1, outputUri));
+                         while (op.done() == null || !op.done()) {
+                                 op = videoClient.getStatus(op.name());
+                         }
+                         List<Video> videos = op.response().videos();
+                         if (videos.size() > 0) {
++                                LOGGER.atDebug()
++                                        .addKeyValue("clips", String.valueOf(videos.size()))
++                                        .log("successfully generated video")
+                                 return ResponseEntity.ok(videos.get(0));
+                         }
+                         return new ResponseEntity<>(HttpStatus.I_AM_A_TEAPOT);
